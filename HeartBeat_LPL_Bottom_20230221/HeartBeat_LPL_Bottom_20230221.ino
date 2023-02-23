@@ -1,5 +1,4 @@
-/* HeartBeat_interval_sample.ino
-
+/* HeartBeat_interval_sample.ino 
     A version of the main datalogging program to work with
     Teensy3.5 and heart rate daughterboard RevB.
 
