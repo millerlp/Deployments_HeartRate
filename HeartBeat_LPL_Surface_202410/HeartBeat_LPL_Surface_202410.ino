@@ -1,22 +1,30 @@
-/* HeartBeat_interval_sample.ino 
+/* HeartBeat_interval_sample.ino
+    
     A version of the main datalogging program to work with
     Teensy3.5 and heart rate daughterboard RevB.
 
+    Updated 2024-10-03 to flash an external LED connected to pin 8
+    at the start of each heart sampling interval (5 minutes usually)
+    
+    Use this as the basis for field deployment programs (2024-10 onward)
+    
     Updated 2023-02-18 to fix the missed-sample issue and lengthen
-    sampling period to 60 seconds from 30 seconds. 
+    sampling period to 60 seconds from 30 seconds.   
+    This version still has an issue with values from one channel
+    bleeding over into the neighboring channel occasionally. This
+    may be due to the multiplexer not changing channels successfully
+    sometimes. 
 
     This version will sample the heart rate sensors at 10Hz
     for 60 seconds, then take a round of temperature readings,
-    and put everything to sleep for the remainder of the minute
+    and put everything to sleep for the remainder of the sample interval
     using the Snooze library, in an attempt to lower the overall
     power usage.
 
-    /* NOTE: there was an issue with the sensors occasionally dropping
-     *  a sample (reporting zero). I have corrected this by clearing
-     *  the FIFO buffer and then waiting for a new sample to appear before
-     *  attempting to read. This results in a slower read time that 
-     *  limits you to only reading 1 sample instead of averaging 4
-     *  in order to stay under the 100ms limit for 10Hz sample intervals
+    This version works with the branched SparkFun MAX3010x library that
+    has the safeCheck() function removed from the getIR() function. However
+    that version of the library appears to break a lot of the other programs
+    in this package including the Sensor_function_check_MAX3010x.ino program
   
     NOTE: If this program is running on the Teensy, the serial
     connection will drop out every time a new set of samples starts,
@@ -27,14 +35,16 @@
 
 */
 
-#include "MAX30105.h"         // https://github.com/sparkfun/SparkFun_MAX3010x_Sensor_Library
-#include <Snooze.h>   // https://github.com/duff2013/Snooze
+#include "MAX30105.h"         // https://github.com/millerlp/SparkFun_MAX3010x_Sensor_Library
+#include "Snooze.h"   // https://github.com/duff2013/Snooze
 #include <TimeLib.h>  // https://github.com/PaulStoffregen/Time
 #include "SSD1306Ascii.h"     // https://github.com/greiman/SSD1306Ascii
 #include "SSD1306AsciiWire.h" // https://github.com/greiman/SSD1306Ascii
 #include <Wire.h>
 #include "SdFat.h"            // https://github.com/greiman/SdFat (compiles with SdFat 2.1.2)
 #include "EEPROM.h"
+
+#define OLED_OFF // Comment out to turn OLED off for power savings
 
 #define MAX_SENSORS 8  // Leave this set at 8, even if fewer than 8 sensors are attached
 #define FAST_SAMPLE_INTERVAL_MS 100 // units millisecond - this sets sampling rate when active
@@ -47,6 +57,7 @@ bool readTempsFlag = false;
 // Debugging stuff, used with logic analyzer
 bool scopePinState = LOW; // for debugging
 int scopePin0 = 30; // for debugging
+int extLEDpin = 8; // for hooking up an external LED to show the board is alive
 
 //--------------------------------------
 // MAX30105 sensor parameters
@@ -56,14 +67,14 @@ byte goodSensors[] = {127, 127, 127, 127, 127, 127, 127, 127};
 byte numgoodSensors = 0;
 // sensor configurations
 byte ledMode = 2; //Options: 1 = Red only, 2 = Red + IR, 3 = Red + IR + Green. Only use 2
-byte REDledBrightness = 1; // low value of 0 shuts it off, 1 is barely on
+byte REDledBrightness = 0; // low value of 0 shuts it off, 1 is barely on
 //byte IRledBrightness = 20; //Options: 0=off to 255=fully on, try 10-30 initially. Too high will make noisy signal
 // Define IR led brightness setting for each of the 8 channels
 // Options: 0=off to 255=fully on, try 10-30 initially. Too high will make noisy signal
 //          Channel =      1   2   3   4   5   6   7   8
-byte IRledBrightness[] = {30, 30, 30, 30, 30, 30, 30, 30};
+byte IRledBrightness[] = {60, 60, 60, 60, 60, 60, 60, 60};
 
-byte sampleAverage = 1; //Options: 1, 2, 4, 8, 16, 32, but only use 1. The others are too slow
+byte sampleAverage = 2; //Options: 1, 2, 4, 8, 16, 32, but only use 1 or 2. The others are too slow
 int pulseWidth = 215; //Options: 69, 118, 215, 411, units microseconds. Applies to all active LEDs. Recommend 215
 // For 118us, max sampleRate = 1000; for 215us, max sampleRate = 800, for 411us, max sampleRate = 400
 int sampleRate = 800; //Options: 50, 100, 200, 400, 800, 1000, 1600, 3200
@@ -153,6 +164,10 @@ void setup() {
   pinMode(scopePin0, OUTPUT);
   digitalWriteFast(scopePin0, scopePinState);
   //**************************
+  // External LED pin
+  pinMode(extLEDpin, OUTPUT); // Hook up an external LED to this pin (usually pin 8)
+  digitalWrite(extLEDpin, LOW); // set voltage to 0 on extLEDpin
+  //***************************
   // Battery monitor pins
   analogReference(EXTERNAL);
   analogReadResolution(10); // set 10 bit resolution
@@ -202,8 +217,12 @@ void setup() {
   // program 'serial_number_generator.ino' available in
   // one of the subfolders of the MusselHeart software
   EEPROM.get(0, serialNumber);
+  char output[sizeof(serialNumber)];
+  EEPROM.get(0, output);
   if (serialNumber[0] == 'S') {
     serialValid = true; // set flag
+    Serial.print("Serial number: ");
+    Serial.println(output);
   }
   //*******************************
   // MAX30105 Sensor setup. This function will scan for avaialble
@@ -293,7 +312,7 @@ void setup() {
     oled.print("Waiting...");
     myTime = Teensy3Clock.get(); // update myTime
 
-    if ( (minute(myTime) % INTERVAL_MINUTES) == 0){
+    if ( ((minute(myTime) % INTERVAL_MINUTES) == 0) & (second(myTime) == 0) ){
       break; // break out of while loop
     }
   }
@@ -302,11 +321,13 @@ void setup() {
   // If we exited the while loop above, a new minute has just
   // started
   oled.clear();
+#ifdef OLED_OFF  
   // Manual shut down of SSD1306 oled display driver
   Wire1.beginTransmission(0x3C); // oled1 display address
   Wire1.write(0x80); // oled set to Command mode (0x80) instead of data mode (0x40)
   Wire1.write(0xAE); // oled command to power down (0xAF should power back up)
   Wire1.endTransmission(); // stop transmitting
+#endif
 
 } // end of setup()
 
@@ -327,8 +348,15 @@ void loop() {
       minute
   */
   myTime = Teensy3Clock.get();
-  digitalWriteFast(scopePin0, HIGH); // debugging, can comment out
-  scopePinState = HIGH; // debugging, can comment out
+//  digitalWriteFast(scopePin0, HIGH); // debugging, can comment out
+//  scopePinState = HIGH; // debugging, can comment out
+  for (int led = 0; led < 4; led++){
+    digitalWrite(extLEDpin,HIGH);
+    delay(20);
+    digitalWrite(extLEDpin,LOW);  
+    delay(50);
+  }
+  
 
   time_t currTime = myTime; // Copy for later
   // If a new day has started, create a new output file
@@ -358,27 +386,54 @@ void loop() {
   time_t startTimeStamp [SAMPLING_LENGTH_SEC * (FAST_SAMPLE_INTERVAL_MS / 10)] = {}; 
   
   uint16_t loopCount = 0;  // Used for counting the SAMPLING_LENGTH_SEC * 10 Hz number of sampling loops
+
+  
+  for (byte channel = 0; channel < MAX_SENSORS; channel++) {
+    if (goodSensors[channel] != 127) {
+      tcaselect(channel);
+      delayMicroseconds(5);
+      max3010x.wakeUp();
+      delayMicroseconds(5);
+    }
+  }
+  
     
   while ( loopCount < (SAMPLING_LENGTH_SEC * (FAST_SAMPLE_INTERVAL_MS / 10)) ) {
     elapsedMillis sampleTimer = 0;
     startTimeStamp[loopCount] = myTime;
     // Start each time through this loop by reawakening IR sensors
       
-      millisStartBuffer[loopCount] = millis(); // Store the current millis value at start of a sample cycle
+    millisStartBuffer[loopCount] = millis(); // Store the current millis value at start of a sample cycle
       
-      for (byte channel = 0; channel < MAX_SENSORS; channel++) {
-        if (goodSensors[channel] != 127) {
-          tcaselect(channel);
-          max3010x.wakeUp(); // Wake up sensor to take sample
-          max3010x.clearFIFO();
-          while(max3010x.check() < 1){} // Idle here until a value is ready
-         
-          sampleBuffer[loopCount][channel] = quickSampleIR();
-//          printSensorOLED(channel, sampleBuffer[loopCount][channel]); // testing only
-
-          max3010x.shutDown(); // shut down sensor once sample is taken to save power
-        }
-      } // End of looping through the 8 channels
+    for (byte channel = 0; channel < MAX_SENSORS; channel++) {
+      if (goodSensors[channel] != 127) {
+          tcaselect(channel); // Change I2C channel to the next sensor
+          max3010x.clearFIFO(); // Clearing FIFO potentially lets you only have to grab one value from the FIFO once it starts to refill
+          long watchdog = millis();
+          bool sampleFlag = false;
+          while( millis() - watchdog < 5) {
+              byte readPointer = max3010x.getReadPointer();
+              byte writePointer = max3010x.getWritePointer();
+              if (readPointer != writePointer){
+                sampleFlag = true;
+                break; // escape the while loop once a new sample has appeared
+              }
+              delayMicroseconds(20);
+              sampleFlag = false;
+          }
+          if (sampleFlag){
+            max3010x.check();  // retrieve the new sample(s) and put them in the max3010x private buffer
+            // Calling getIR() should get the most recent value from the buffer of values
+            sampleBuffer[loopCount][channel] = max3010x.getIR();  // modify getIR in the library to remove safeCheck() function        
+          } else {
+            sampleBuffer[loopCount][channel] = 0;  // modify getIR in the library to remove safeCheck() function   
+          }
+          
+#ifndef OLED_OFF           
+          printSensorOLED(channel, sampleBuffer[loopCount][channel]); // testing only
+#endif
+      }
+    } // End of looping through the 8 channels
 
 
     millisEndBuffer[loopCount] = millis(); // Store the millis value at the end of a single sample cycle
@@ -496,11 +551,14 @@ void loop() {
     // and the temperature readings, and will be going to sleep next
     for (int i = 0; i < 4; i++) {
       setColor(0, 255, 0);
+      digitalWrite(extLEDpin,HIGH);
       delay(5);
       setColor(0, 0, 0);
+      digitalWrite(extLEDpin,LOW);
       delay(5);
     }
   } // end of if (myTime == SAMPLING_LENGTH_SEC & readTempsFlag == true) section
+
 
   //*****************************************************
   // After the temperature samples have been taken, spend the
@@ -915,6 +973,7 @@ uint32_t quickSampleIR(void) {
   // If sampleAverage is >1, the sensor should be internally averaging the
   // readings, and this getIR() function will return the most recent averaged value
   uint32_t tempIR = max3010x.getIR();
+//  uint32_t tempIR = max3010x.getFIFOIR();
   //  digitalWriteFast(IRPIN, LOW);  // troubleshooting, can comment out
   return (tempIR);
 
