@@ -72,7 +72,7 @@ byte REDledBrightness = 0; // low value of 0 shuts it off, 1 is barely on
 // Define IR led brightness setting for each of the 8 channels
 // Options: 0=off to 255=fully on, try 10-30 initially. Too high will make noisy signal
 //          Channel =      1   2   3   4   5   6   7   8
-byte IRledBrightness[] = {60, 60, 60, 60, 60, 60, 60, 60};
+byte IRledBrightness[] = {30, 30, 30, 30, 50, 50, 30, 30}; // For 2024-10 deploy
 
 byte sampleAverage = 2; //Options: 1, 2, 4, 8, 16, 32, but only use 1 or 2. The others are too slow
 int pulseWidth = 215; //Options: 69, 118, 215, 411, units microseconds. Applies to all active LEDs. Recommend 215
